@@ -43,7 +43,7 @@ function findColumn(headers: string[], aliases: string[]): string | null {
 }
 
 // Główna funkcja normalizująca dowolny CSV do Twojego formatu
-export function mapGenericCsv(rows: any[]): NormalizedTrade[] {
+ function mapGenericCsv(rows: any[]): NormalizedTrade[] {
   if (!rows.length) return [];
 
   const headers = Object.keys(rows[0]);

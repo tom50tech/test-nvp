@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import React, { FormEvent, useState } from "react";
 import type { TradeRow, TradeStats } from "@/lib/types";
 
 interface Props {
@@ -246,9 +246,6 @@ export default function DashboardClient({ email }: Props) {
                       <Td>{row.cena_wyjscia}</Td>
                       <Td
                         style={{
-                          padding: "6px 8px",
-                          borderBottom: "1px solid #e2e8f0",
-                          whiteSpace: "nowrap",
                           color:
                             row.wynik > 0
                               ? "#15803d"
@@ -303,13 +300,20 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Td({ children }: { children: React.ReactNode }) {
+function Td({
+  children,
+  style
+}: {
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+}) {
   return (
     <td
       style={{
         padding: "6px 8px",
         borderBottom: "1px solid #e2e8f0",
-        whiteSpace: "nowrap"
+        whiteSpace: "nowrap",
+        ...(style || {})
       }}
     >
       {children}

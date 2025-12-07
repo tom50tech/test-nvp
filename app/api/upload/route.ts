@@ -1,6 +1,5 @@
 // app/api/upload/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import Papa from 'papaparse';
 
 // Wewnętrzny ujednolicony typ transakcji
 type NormalizedTrade = {
@@ -47,7 +46,7 @@ function normalizeHeader(name: string) {
     .toLowerCase()
     .normalize('NFD') // usuń ogonki
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, ''); // usuń spacje, kropki, itp.
+    .replace(/[^a-z0-9]/g, ''); // usuń spacje, kropki itp.
 }
 
 function findColumn(headers: string[], aliases: string[]): string | null {
@@ -65,6 +64,46 @@ function findColumn(headers: string[], aliases: string[]): string | null {
   return null;
 }
 
+// Prosty parser CSV bez zewnętrznych bibliotek
+function parseCsv(text: string): any[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) return [];
+
+  const headerLine = lines[0];
+
+  // Wykrywamy separator: ; lub , (prosto, ale działa w typowych plikach brokerów)
+  let delimiter = ',';
+  if (headerLine.includes(';') && !headerLine.includes(',')) {
+    delimiter = ';';
+  }
+
+  const headers = headerLine
+    .split(delimiter)
+    .map((h) => h.trim().replace(/^"|"$/g, ''));
+
+  const rows: any[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+
+    const parts = line.split(delimiter).map((p) => p.trim().replace(/^"|"$/g, ''));
+    if (parts.length === 1 && parts[0] === '') continue;
+
+    const obj: any = {};
+    headers.forEach((h, idx) => {
+      obj[h] = parts[idx] ?? '';
+    });
+    rows.push(obj);
+  }
+
+  return rows;
+}
+
 // Mapowanie dowolnego CSV (PL/EN) do naszego wewnętrznego formatu
 function mapGenericCsv(rows: any[]): NormalizedTrade[] {
   if (!rows.length) return [];
@@ -79,7 +118,6 @@ function mapGenericCsv(rows: any[]): NormalizedTrade[] {
   const exitCol = findColumn(headers, COLUMN_ALIASES.exitPrice);
   const profitCol = findColumn(headers, COLUMN_ALIASES.profit);
 
-  // Inteligentna walidacja wymaganych pól
   if (!dateCol || !instrumentCol || !typeCol || (!profitCol && (!entryCol || !exitCol))) {
     throw new Error(
       'Could not match required columns. File must contain at least: date, instrument, type, and either profit or entry/exit prices.'
@@ -96,39 +134,49 @@ function mapGenericCsv(rows: any[]): NormalizedTrade[] {
         ? 'SELL'
         : rawType.toUpperCase() || 'UNKNOWN';
 
-    const volume = volumeCol ? Number(String(row[volumeCol]).replace(',', '.')) : undefined;
+    const volumeRaw = volumeCol ? String(row[volumeCol]) : '';
+    const volume = volumeRaw ? Number(volumeRaw.replace(',', '.')) : undefined;
 
     let entryPrice: number | undefined;
     let exitPrice: number | undefined;
     let profit: number | undefined;
 
-    if (profitCol && row[profitCol] !== undefined && row[profitCol] !== '') {
-      profit = Number(String(row[profitCol]).replace(',', '.'));
+    const profitRaw = profitCol ? String(row[profitCol] ?? '') : '';
+
+    if (profitRaw !== '') {
+      profit = Number(profitRaw.replace(',', '.'));
     } else {
-      if (entryCol && row[entryCol] !== undefined && row[entryCol] !== '') {
-        entryPrice = Number(String(row[entryCol]).replace(',', '.'));
+      const entryRaw = entryCol ? String(row[entryCol] ?? '') : '';
+      const exitRaw = exitCol ? String(row[exitCol] ?? '') : '';
+
+      if (entryRaw !== '') {
+        entryPrice = Number(entryRaw.replace(',', '.'));
       }
-      if (exitCol && row[exitCol] !== undefined && row[exitCol] !== '') {
-        exitPrice = Number(String(row[exitCol]).replace(',', '.'));
+      if (exitRaw !== '') {
+        exitPrice = Number(exitRaw.replace(',', '.'));
       }
+
       if (entryPrice !== undefined && exitPrice !== undefined) {
         profit = typeNorm === 'BUY' ? exitPrice - entryPrice : entryPrice - exitPrice;
       }
     }
 
+    const clean = (v: number | undefined) =>
+      v === undefined || Number.isNaN(v) ? undefined : v;
+
     return {
       date: String(row[dateCol!]),
       instrument: String(row[instrumentCol!]),
       type: typeNorm,
-      volume: isNaN(volume ?? NaN) ? undefined : volume,
-      entryPrice: isNaN(entryPrice ?? NaN) ? undefined : entryPrice,
-      exitPrice: isNaN(exitPrice ?? NaN) ? undefined : exitPrice,
-      profit: isNaN(profit ?? NaN) ? undefined : profit,
+      volume: clean(volume),
+      entryPrice: clean(entryPrice),
+      exitPrice: clean(exitPrice),
+      profit: clean(profit),
     };
   });
 }
 
-// Proste statystyki – BEZ typowania TradeStats, żeby TS się nie czepiał
+// Proste statystyki – bez osobnego typu, żeby TS się nie czepiał
 function calculateStats(trades: NormalizedTrade[]) {
   const totalTrades = trades.length;
 
@@ -143,17 +191,21 @@ function calculateStats(trades: NormalizedTrade[]) {
     };
   }
 
-  const withProfit = trades.filter((t) => typeof t.profit === 'number') as Required<
-    Pick<NormalizedTrade, 'profit'>
-  >[];
+  const withProfit = trades.filter((t) => typeof t.profit === 'number') as {
+    profit: number;
+  }[];
 
   const winTrades = withProfit.filter((t) => t.profit > 0).length;
   const loseTrades = withProfit.filter((t) => t.profit < 0).length;
 
   const winRate = totalTrades ? (winTrades / totalTrades) * 100 : 0;
 
-  const totalProfit = withProfit.filter((t) => t.profit > 0).reduce((s, t) => s + t.profit, 0);
-  const totalLoss = withProfit.filter((t) => t.profit < 0).reduce((s, t) => s + t.profit, 0); // będzie ujemne
+  const totalProfit = withProfit
+    .filter((t) => t.profit > 0)
+    .reduce((s, t) => s + t.profit, 0);
+  const totalLoss = withProfit
+    .filter((t) => t.profit < 0)
+    .reduce((s, t) => s + t.profit, 0); // ujemne
 
   const avgProfit = winTrades ? totalProfit / winTrades : 0;
   const avgLoss = loseTrades ? totalLoss / loseTrades : 0;
@@ -180,20 +232,7 @@ export async function POST(req: NextRequest) {
 
     const text = await file.text();
 
-    const parsed = Papa.parse(text, {
-      header: true,
-      skipEmptyLines: true,
-    });
-
-    if (parsed.errors && parsed.errors.length > 0) {
-      console.error('CSV PARSE ERRORS:', parsed.errors);
-      return NextResponse.json(
-        { error: 'Błąd podczas odczytu pliku CSV. Sprawdź format.' },
-        { status: 400 }
-      );
-    }
-
-    const rows = parsed.data as any[];
+    const rows = parseCsv(text);
 
     const trades = mapGenericCsv(rows);
     const stats = calculateStats(trades);
@@ -202,7 +241,7 @@ export async function POST(req: NextRequest) {
       {
         success: true,
         stats,
-        trades, // możesz to usunąć, jeśli front nie potrzebuje pojedynczych transakcji
+        trades, // można usunąć, jeśli front nie potrzebuje
       },
       { status: 200 }
     );

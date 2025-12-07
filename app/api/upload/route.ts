@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { TradeRow, TradeStats } from "@/lib/types";
+import type { TradeRow } from "@/lib/types";
 
 /**
  * Map various possible CSV header names to our canonical TradeRow keys.
- * We keep code in English, UI can be translated separately.
+ * Code stays in English, UI texts can be translated separately.
  */
 const HEADER_MAP: Record<string, keyof TradeRow | "wynik"> = {
   // date / time
@@ -79,9 +79,9 @@ function normalizeType(raw: string | undefined): string {
 
 /**
  * Compute basic statistics for the uploaded trades.
- * Matches TradeStats type: totalTrades, winRate, totalPnL, avgProfit, avgLoss, winTrades, losingTrades
+ * We don't force the return type here to avoid conflicts with local TS definitions.
  */
-function computeStats(rows: TradeRow[]): TradeStats {
+function computeStats(rows: TradeRow[]) {
   const totalTrades = rows.length;
 
   let winTrades = 0;
@@ -199,7 +199,6 @@ export async function POST(req: NextRequest) {
       const instrument = (get(headerIndexes.instrument) || "").trim();
       const typ = normalizeType(get(headerIndexes.typ));
       const wolumen = normalizeNumber(get(headerIndexes.wolumen));
-
       const cena_wejscia = normalizeNumber(get(headerIndexes.cena_wejscia));
       const cena_wyjscia = normalizeNumber(get(headerIndexes.cena_wyjscia));
 

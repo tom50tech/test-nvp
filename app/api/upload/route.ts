@@ -1,244 +1,107 @@
-import { NextRequest, NextResponse } from "next/server";
-import type { TradeRow } from "@/lib/types";
-
-/**
- * Map various possible CSV header names to our canonical TradeRow keys.
- * Code stays in English, UI texts can be translated separately.
- */
-const HEADER_MAP: Record<string, keyof TradeRow | "wynik"> = {
-  // date / time
-  "data": "data",
-  "date": "data",
-  "time": "data",
-  "open time": "data",
-  "open_time": "data",
-
-  // instrument / symbol / pair
-  "instrument": "instrument",
-  "symbol": "instrument",
-  "pair": "instrument",
-  "para": "instrument",
-
-  // side / type
-  "typ": "typ",
-  "type": "typ",
-  "side": "typ",
-  "direction": "typ",
-
-  // volume / size
-  "wolumen": "wolumen",
-  "volume": "wolumen",
-  "size": "wolumen",
-  "qty": "wolumen",
-  "quantity": "wolumen",
-
-  // entry price
-  "cena_wejscia": "cena_wejscia",
-  "open": "cena_wejscia",
-  "open price": "cena_wejscia",
-  "price open": "cena_wejscia",
-  "entry price": "cena_wejscia",
-  "open_price": "cena_wejscia",
-
-  // exit price
-  "cena_wyjscia": "cena_wyjscia",
-  "close": "cena_wyjscia",
-  "close price": "cena_wyjscia",
-  "price close": "cena_wyjscia",
-  "exit price": "cena_wyjscia",
-  "close_price": "cena_wyjscia",
-
-  // profit / result
-  "wynik": "wynik",
-  "profit": "wynik",
-  "p/l": "wynik",
-  "pnl": "wynik",
-  "p&l": "wynik",
-  "zysk": "wynik",
-  "zysk/strata": "wynik"
+// Typ wewnętrzny – na nim potem liczysz statystyki
+export type NormalizedTrade = {
+  date: string;
+  instrument: string;
+  type: string;              // 'BUY' / 'SELL' / itp.
+  volume?: number;
+  entryPrice?: number;
+  exitPrice?: number;
+  profit?: number;
 };
 
-function normalizeHeader(raw: string): string {
-  return raw.trim().toLowerCase().replace(/\s+/g, " ");
+// Alias nagłówków – PL + EN + typowe warianty
+const COLUMN_ALIASES = {
+  date:       ['date', 'data', 'open time', 'open_time', 'czas otwarcia'],
+  instrument: ['instrument', 'symbol', 'market', 'rynek'],
+  type:       ['type', 'typ', 'side', 'direction', 'kierunek'],
+  volume:     ['volume', 'wolumen', 'size', 'ilosc'],
+  entryPrice: ['entry price', 'entry_price', 'cena wejścia', 'cena_wejscia', 'open', 'open price'],
+  exitPrice:  ['exit price', 'exit_price', 'cena wyjścia', 'cena_wyjscia', 'close', 'close price'],
+  profit:     ['profit', 'p/l', 'p&l', 'wynik', 'zysk/strata', 'zysk', 'strata'],
+};
+
+function normalizeHeader(name: string) {
+  return name
+    .toLowerCase()
+    .normalize('NFD')                  // usuń ogonki
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');        // usuń spacje, kropki itp.
 }
 
-function normalizeNumber(raw: string | undefined): number {
-  if (!raw) return 0;
-  // remove spaces, change comma to dot
-  const cleaned = raw.replace(/\s/g, "").replace(",", ".");
-  const n = Number(cleaned);
-  return isNaN(n) ? 0 : n;
-}
+function findColumn(headers: string[], aliases: string[]): string | null {
+  const normalizedHeaders = headers.map(h => ({
+    original: h,
+    normalized: normalizeHeader(h),
+  }));
 
-function normalizeType(raw: string | undefined): string {
-  const v = (raw || "").trim().toUpperCase();
-  if (v.startsWith("BUY") || v === "LONG") return "BUY";
-  if (v.startsWith("SELL") || v === "SHORT") return "SELL";
-  return v || "UNKNOWN";
-}
-
-/**
- * Compute basic statistics for the uploaded trades.
- * We don't force the return type here to avoid conflicts with local TS definitions.
- */
-function computeStats(rows: TradeRow[]) {
-  const totalTrades = rows.length;
-
-  let winTrades = 0;
-  let losingTrades = 0;
-  let totalPnL = 0;
-  let sumProfit = 0;
-  let sumLoss = 0;
-
-  for (const r of rows) {
-    totalPnL += r.wynik;
-
-    if (r.wynik > 0) {
-      winTrades += 1;
-      sumProfit += r.wynik;
-    } else if (r.wynik < 0) {
-      losingTrades += 1;
-      sumLoss += r.wynik;
-    }
+  for (const alias of aliases) {
+    const normAlias = normalizeHeader(alias);
+    const match = normalizedHeaders.find(h => h.normalized === normAlias);
+    if (match) return match.original;
   }
-
-  const winRate = totalTrades > 0 ? (winTrades / totalTrades) * 100 : 0;
-  const avgProfit = winTrades > 0 ? sumProfit / winTrades : 0;
-  const avgLoss = losingTrades > 0 ? sumLoss / losingTrades : 0;
-
-  return {
-    totalTrades,
-    winRate,
-    totalPnL,
-    avgProfit,
-    avgLoss,
-    winTrades,
-    losingTrades
-  };
+  return null;
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const formData = await req.formData();
-    const file = formData.get("file");
+// Główna funkcja normalizująca dowolny CSV do Twojego formatu
+export function mapGenericCsv(rows: any[]): NormalizedTrade[] {
+  if (!rows.length) return [];
 
-    if (!(file instanceof File)) {
-      return NextResponse.json(
-        { message: "No file provided in request." },
-        { status: 400 }
-      );
-    }
+  const headers = Object.keys(rows[0]);
 
-    const text = await file.text();
+  const dateCol       = findColumn(headers, COLUMN_ALIASES.date);
+  const instrumentCol = findColumn(headers, COLUMN_ALIASES.instrument);
+  const typeCol       = findColumn(headers, COLUMN_ALIASES.type);
+  const volumeCol     = findColumn(headers, COLUMN_ALIASES.volume);
+  const entryCol      = findColumn(headers, COLUMN_ALIASES.entryPrice);
+  const exitCol       = findColumn(headers, COLUMN_ALIASES.exitPrice);
+  const profitCol     = findColumn(headers, COLUMN_ALIASES.profit);
 
-    // Detect delimiter: if there are more semicolons than commas in header -> use ';'
-    const firstLine = text.split(/\r?\n/)[0] || "";
-    const semicolons = (firstLine.match(/;/g) || []).length;
-    const commas = (firstLine.match(/,/g) || []).length;
-    const delimiter = semicolons > commas ? ";" : ",";
-
-    const lines = text
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-
-    if (lines.length < 2) {
-      return NextResponse.json(
-        { message: "CSV file does not contain data rows." },
-        { status: 400 }
-      );
-    }
-
-    const headerRaw = lines[0].split(delimiter);
-    const headerIndexes: Partial<Record<keyof TradeRow | "wynik", number>> = {};
-
-    headerRaw.forEach((h, idx) => {
-      const norm = normalizeHeader(h);
-      const mapped = HEADER_MAP[norm];
-      if (mapped) {
-        headerIndexes[mapped] = idx;
-      }
-    });
-
-    // Minimal requirements:
-    // - date, instrument, type
-    // AND
-    // - either explicit wynik/profit
-    //   OR entry + exit price to compute wynik
-    if (
-      headerIndexes.data === undefined ||
-      headerIndexes.instrument === undefined ||
-      headerIndexes.typ === undefined ||
-      (headerIndexes.wynik === undefined &&
-        (headerIndexes.cena_wejscia === undefined ||
-          headerIndexes.cena_wyjscia === undefined))
-    ) {
-      return NextResponse.json(
-        {
-          message:
-            "Could not match required columns. File must contain at least: date, instrument, type, and either profit or entry/exit prices.",
-          debug: { headerRaw, headerIndexes }
-        },
-        { status: 400 }
-      );
-    }
-
-    const rows: TradeRow[] = [];
-
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i];
-      const parts = line.split(delimiter);
-
-      // skip empty rows (just in case)
-      if (parts.every((p) => p.trim() === "")) continue;
-
-      const get = (idx: number | undefined): string | undefined =>
-        idx === undefined ? undefined : parts[idx];
-
-      const data = (get(headerIndexes.data) || "").trim();
-      const instrument = (get(headerIndexes.instrument) || "").trim();
-      const typ = normalizeType(get(headerIndexes.typ));
-      const wolumen = normalizeNumber(get(headerIndexes.wolumen));
-      const cena_wejscia = normalizeNumber(get(headerIndexes.cena_wejscia));
-      const cena_wyjscia = normalizeNumber(get(headerIndexes.cena_wyjscia));
-
-      let wynik: number;
-      if (headerIndexes.wynik !== undefined) {
-        wynik = normalizeNumber(get(headerIndexes.wynik));
-      } else {
-        // fallback: compute wynik from price difference * volume
-        const diff =
-          typ === "SELL"
-            ? cena_wejscia - cena_wyjscia
-            : cena_wyjscia - cena_wejscia;
-        wynik = diff * (wolumen || 1);
-      }
-
-      rows.push({
-        data,
-        instrument,
-        typ,
-        wolumen,
-        cena_wejscia,
-        cena_wyjscia,
-        wynik
-      });
-    }
-
-    const stats = computeStats(rows);
-
-    return NextResponse.json(
-      {
-        stats,
-        rows
-      },
-      { status: 200 }
-    );
-  } catch (error) {
-    console.error("CSV upload error:", error);
-    return NextResponse.json(
-      { message: "Error while processing CSV file." },
-      { status: 500 }
+  // Twarda walidacja – ale już „mądra”, nie po jednym stringu
+  if (!dateCol || !instrumentCol || !typeCol || (!profitCol && (!entryCol || !exitCol))) {
+    throw new Error(
+      'Nie udało się dopasować wymaganych kolumn. ' +
+      'Po prostu wyeksportuj historię transakcji z brokera i wgraj plik bez zmian.'
     );
   }
+
+  return rows.map((row) => {
+    const rawType = String(row[typeCol!]).toLowerCase();
+
+    const typeNorm =
+      rawType.startsWith('b') || rawType.includes('kup') ? 'BUY' :
+      rawType.startsWith('s') || rawType.includes('sprz') ? 'SELL' :
+      rawType.toUpperCase();
+
+    const volume   = volumeCol ? Number(row[volumeCol]) : undefined;
+
+    let entryPrice: number | undefined;
+    let exitPrice: number | undefined;
+    let profit: number | undefined;
+
+    if (profitCol && row[profitCol] !== undefined && row[profitCol] !== '') {
+      profit = Number(String(row[profitCol]).replace(',', '.'));
+    } else {
+      if (entryCol && row[entryCol] !== undefined) {
+        entryPrice = Number(String(row[entryCol]).replace(',', '.'));
+      }
+      if (exitCol && row[exitCol] !== undefined) {
+        exitPrice = Number(String(row[exitCol]).replace(',', '.'));
+      }
+      if (entryPrice !== undefined && exitPrice !== undefined) {
+        profit = typeNorm === 'BUY'
+          ? exitPrice - entryPrice
+          : entryPrice - exitPrice;
+      }
+    }
+
+    return {
+      date: String(row[dateCol!]),
+      instrument: String(row[instrumentCol!]),
+      type: typeNorm,
+      volume,
+      entryPrice,
+      exitPrice,
+      profit,
+    };
+  });
 }
